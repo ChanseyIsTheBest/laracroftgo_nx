@@ -1185,8 +1185,42 @@ static void nx_install_fps_override(void) {
  * because a quality-level change or a scene load can reapply the player
  * settings and put the 30 back. */
 static void nx_force_target_framerate(void) {
+#if LCGO_HAVE_NATIVE_TFR
+  /* PRIMARY PATH: write libunity's own target-frame-rate global directly.
+   *
+   * GetActualTargetFrameRate() reads this int when vSyncCount <= 0, and
+   * substitutes a hardcoded 30.0f if it is not > 0. It ships as -1 and this
+   * game never sets it, which IS the 30 fps cap. Storing 60 here is the whole
+   * fix, and unlike the managed hook it needs no icall resolution and no
+   * cooperation from the game. */
+  {
+    static int native_ok = -1;            /* -1 unchecked, 0 bad offset, 1 good */
+    const uintptr_t ub = (uintptr_t)unity_mod.load_virtbase;
+    if (native_ok < 0) {
+      const uint32_t w0 = *(volatile uint32_t *)(ub + LCGO_SET_TFR_NATIVE_FN);
+      const uint32_t w1 = *(volatile uint32_t *)(ub + LCGO_SET_TFR_NATIVE_FN + 4);
+      native_ok = (w0 == LCGO_WORD_SETTFR_ADRP && w1 == LCGO_WORD_SETTFR_STR);
+      if (!native_ok)
+        debugPrintf("[fps] SKIP native TFR: SetTargetFrameRate @libunity+0x%x = "
+                    "0x%08x/0x%08x, expected 0x%08x/0x%08x\n",
+                    (unsigned)LCGO_SET_TFR_NATIVE_FN, w0, w1,
+                    (unsigned)LCGO_WORD_SETTFR_ADRP, (unsigned)LCGO_WORD_SETTFR_STR);
+    }
+    if (native_ok) {
+      volatile int32_t *g = (volatile int32_t *)(ub + LCGO_NATIVE_TFR_GLOBAL);
+      const int32_t was = *g;
+      if (was != g_tfr_want) {
+        *g = g_tfr_want;
+        debugPrintf("[fps] native targetFrameRate: %d -> %d "
+                    "(libunity+0x%x; %d meant 'unset' and fell back to the "
+                    "hardcoded 30)\n",
+                    (int)was, g_tfr_want, (unsigned)LCGO_NATIVE_TFR_GLOBAL, (int)was);
+      }
+    }
+  }
+#endif
 #if LCGO_HAVE_FPS_OVERRIDE
-  if (!g_tfr_orig) return;               /* resolve failed; nothing to call */
+  if (!g_tfr_orig) return;               /* managed path optional; native did it */
   static int announced = 0;
   if (!announced) {
     announced = 1;
@@ -1987,6 +2021,10 @@ int main(int argc, char *argv[]) {
      * change or scene load can reapply Unity's mobile default (30) underneath
      * us. Frame 2 rather than 0 so il2cpp and the player loop are fully live. */
     if (frame == 2 || (frame % 300) == 0) nx_force_target_framerate();
+    /* Entitlements: install once the managed runtime is live. Frame 2 for the
+     * same reason as the framerate assert -- il2cpp must be fully up before we
+     * splice a managed thunk. */
+    if (frame == 2) { extern void lcgo_entitlements_init(void); lcgo_entitlements_init(); }
     if (frame < 5 || (frame % 120) == 0) debugPrintf("[boot] frame %d rendered\n", frame);
     /* Ask the managed runtime what it thinks exists. Must be here, after
      * nativeRender returned: this is the Unity main thread. */

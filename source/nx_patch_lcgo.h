@@ -724,4 +724,157 @@ static const NxPatchWord LCGO_BRANCH_FORCES[] = {
 #define LCGO_SET_VSYNC_SIG \
   "UnityEngine.QualitySettings::set_vSyncCount(System.Int32)"
 
+/* ---------------------------------------------------------------------------
+ * NATIVE target-frame-rate global -- the real storage, and the real 30 fps cap.
+ *
+ * Everything above operates on the MANAGED side (il2cpp icall thunks). That is
+ * one layer too high. The engine's own accessors in libunity are:
+ *
+ *   SetTargetFrameRate(int)            game 0x45d9dc
+ *       adrp x8,#0x1055000
+ *       str  w0,[x8,#0xe9c]            <-- the ONLY store to the global
+ *       b    0x5daaa4                  (notify Swappy)
+ *
+ *   GetActualTargetFrameRate()         game 0x45da58   <-- what the loop reads
+ *       bl   GetVSyncCount             -> w0
+ *       cmp  w0,#0 ; b.le  fallback
+ *       ...  fdiv s0, refresh_hz, vsync        (vsync path)
+ *     fallback:
+ *       adrp x8,#0x1055000
+ *       ldr  s0,[x8,#0xe9c]            <-- reads the SAME global
+ *       scvtf s0,s0
+ *       fcmp s0,#0.0
+ *       fmov s1,#30.00000000           <-- *** the literal 30 ***
+ *       fcsel s0,s0,s1,hi              <-- s0 = (s0 > 0) ? s0 : 30
+ *
+ * The global at 0x1055e9c lives in .data and its initial value in the file is
+ * -1, i.e. "unset". This game never assigns Application.targetFrameRate and
+ * reports vSyncCount=0, so BOTH branches fail: the vsync path is skipped
+ * (count 0), the fallback loads -1, -1 is not > 0, and fcsel substitutes the
+ * hardcoded 30. That is the 30 fps cap, and it is why every managed-side fix
+ * did nothing -- the value was never reaching this global at all.
+ *
+ * Writing it directly removes the dependency on il2cpp_resolve_icall working,
+ * on the game touching the property, and on the vSyncCount path entirely: one
+ * store to libunity+0xe9c and GetActualTargetFrameRate returns 60.0f.
+ *
+ * VERIFY-FIRST: the installer checks SetTargetFrameRate's first two words match
+ * the adrp/str pair above before trusting the offset, so a wrong address logs
+ * and skips rather than corrupting .data. */
+#define LCGO_HAVE_NATIVE_TFR      1
+#define LCGO_NATIVE_TFR_GLOBAL    0x1055e9c   /* int, .data, initial -1        */
+#define LCGO_SET_TFR_NATIVE_FN    0x45d9dc    /* SetTargetFrameRate(int)       */
+#define LCGO_WORD_SETTFR_ADRP     0x90005fc8u /* adrp x8,#0x1055000            */
+#define LCGO_WORD_SETTFR_STR      0xb90e9d00u /* str  w0,[x8,#0xe9c]           */
+
+/* ===========================================================================
+ * ENTITLEMENTS -- restoring DLC the player already owns
+ * ===========================================================================
+ * There is no Google Play billing on this console, so the two paid items can
+ * never be presented here: GoogleShop cannot initialise, the player's Play
+ * receipts cannot be shown to anything, and the entitlement check is therefore
+ * UNREACHABLE rather than defeated. lcgo_purchases.txt is the player's own
+ * statement of what they own; the default state is owning nothing.
+ *
+ * ---------------------------------------------------------------------------
+ * ITEM 1: Square Enix Outfit Pack  --  CONFIRMED, clean hook
+ * ---------------------------------------------------------------------------
+ * Outfit lock state is a PlayerPrefs BOOLEAN, not a shop-inventory counter.
+ * From global-metadata.dat, the key template is verbatim:
+ *
+ *     "{0}_IsOutfitLocked"           <- one per outfit, formatted with its name
+ *     "CurrentOutfitIndex"
+ *
+ * and the accessor pair is:
+ *
+ *     PlayerPrefsEx.SetBool(string,bool)   RVA 0xF83760
+ *     PlayerPrefsEx.GetBool(string)        RVA 0xF8376C
+ *         str  x30,[sp,#-0x10]!    <- 0xf81f0ffe, clean spliceable prologue
+ *         mov  x1,xzr
+ *         bl   PlayerPrefs.GetInt  (0x1F00984)
+ *         cmp  w0,#1 ; cset w0,eq ; ret
+ *
+ * OutfitDesc (dump.cs:157894) holds m_IsLocked, m_ModelName and a direct
+ * Material reference -- a serialized Material can only point at something
+ * already in the built bundles, so the outfit CONTENT is local. Nothing is
+ * downloaded; the models are in the 1.02 GB tree and merely flagged locked.
+ *
+ * We hook the GETTER, not the setter. That means NOTHING IS WRITTEN TO THE
+ * SAVE: delete lcgo_purchases.txt and the game is byte-for-byte as it was.
+ * That matters here specifically because this game has cloud saves
+ * (GameStructure.m_IsCloudSaveEnabled / ICloudComponent m_Persistence) that
+ * sync to Square Enix -- a hook that wrote entitlement flags into the save
+ * could push them upstream. A read-side hook cannot.
+ *
+ * ---------------------------------------------------------------------------
+ * ITEM 2: Complete Walkthrough (hints)  --  SKU known, hook NOT yet confirmed
+ * ---------------------------------------------------------------------------
+ * This is a SEPARATE product from the outfits. Its SKU is in the metadata:
+ *
+ *     "com.squareenix.laracroftgo.completewalkthrough"
+ *     "LABEL_SHOP_COMPLETEWALKTHROUGH_DESC"
+ *     GameStructure.s_CompleteWalkthroughId          (static field)
+ *     ShopViewController.ActivateCompleteWalkthrough()   RVA 0x1138304
+ *
+ * Unlike the outfits, hints are NOT a PlayerPrefs bool. The full persisted-key
+ * list from metadata is Chapter_ / Level_ / CurrentOutfitIndex /
+ * {0}_IsOutfitLocked / LaunchedOnce / <name>TutorialDone -- and no walkthrough
+ * entry among them. Hint
+ * ownership instead lives in the shop Inventory (persisted under the Armory key
+ * "technology.shop.inventory"), keyed by offer id with a SecureLocalInt
+ * quantity. That store is populated by a shop that cannot initialise here.
+ *
+ * ActivateCompleteWalkthrough() is the game's own grant method and would be the
+ * right thing to call, but its body is UI-driven: it needs a live
+ * ShopViewController `this` (it reads [x19,#0x20] and drives view state), so it
+ * can only be invoked from the buy button the way the Killer Bean port hooks
+ * Purchase_*. That is a real hook point, but it has NOT been verified on
+ * hardware, and the query the game uses to decide hints are available has not
+ * been located.
+ *
+ * Rather than guess, LCGO_ENT_TRACE below logs every PlayerPrefsEx.GetBool key
+ * the game asks for. Open the hints/shop screen once with it on and the answer
+ * is in debug.log; if a walkthrough-ish key appears, it is a one-line addition
+ * to the matcher and hints work exactly like the outfits.
+ * ------------------------------------------------------------------------- */
+/* ---------------------------------------------------------------------------
+ * DISABLED. Set LCGO_HAVE_ENTITLEMENTS to 1 to re-enable.
+ *
+ * With this at 0 the feature is completely inert: lcgo_entitlements.c compiles
+ * to a single empty function, nothing is hooked, no key trace is emitted, and
+ * -- importantly -- lcgo_purchases.txt is NEITHER READ NOR CREATED. A build
+ * with this off leaves no trace of the feature on the SD card at all.
+ *
+ * Everything above this line is derivation notes, not code, and is kept because
+ * it is the expensive part: the key template, the accessor RVAs and their
+ * verified prologue words, and the evidence that the outfit content is local.
+ * Re-enabling is a one-character change, not a re-derivation.
+ *
+ * STATUS WHEN DISABLED (from the second hardware run):
+ *   - the hook never successfully installed, so the approach is UNTESTED
+ *     rather than disproven -- the first two attempts died on a branch-range
+ *     bug (a static thunk cannot `bl` 82 GB into libil2cpp), since fixed
+ *   - the in-game Restore Purchases button was pressed and did NOT reach the
+ *     billing plugin: GoogleIABPlugin.instance() is called once at startup and
+ *     never again, so GoogleShop.RestorePurchases() never ran and the other two
+ *     shops are `mov w0,#1 ; ret` stubs
+ *   - the offers and artwork ARE local (ShopConfiguration and
+ *     square_universe_pack_large both load fine); only the ownership record is
+ *     missing, which is what this feature was meant to supply
+ * ------------------------------------------------------------------------- */
+#define LCGO_HAVE_ENTITLEMENTS   0
+#define LCGO_ENT_TRACE           0   /* log every GetBool key (see above)     */
+
+#define LCGO_PPX_GETBOOL_RVA     0xf8376c   /* PlayerPrefsEx.GetBool(string)  */
+#define LCGO_WORD_PPX_GETBOOL    0xf81f0ffeu /* str x30,[sp,#-0x10]!          */
+#define LCGO_PPX_SETBOOL_RVA     0xf83760   /* PlayerPrefsEx.SetBool(str,bool)*/
+#define LCGO_WORD_PPX_SETBOOL    0x12000021u /* and w1,w1,#1                  */
+
+/* Key suffix that marks an outfit lock flag. Matched case-sensitively against
+ * the tail of the key, so it catches every outfit without needing their names. */
+#define LCGO_OUTFIT_LOCK_SUFFIX  "_IsOutfitLocked"
+
+/* The walkthrough SKU, for the trace and for future use. */
+#define LCGO_SKU_WALKTHROUGH     "com.squareenix.laracroftgo.completewalkthrough"
+
 #endif /* NX_PATCH_LCGO_H */
