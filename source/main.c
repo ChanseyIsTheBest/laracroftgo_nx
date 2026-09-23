@@ -36,6 +36,7 @@
 #include "opensles.h"
 #include "unity_entrypoints.h"
 #include "diag.h"
+#include "lcgo_saveedit.h"      /* save.txt -> SaveData*.runtime at boot */
 
 #define LIB_MAIN   "libmain.so"
 #define LIB_UNITY  "libunity.so"
@@ -1464,6 +1465,11 @@ int main(int argc, char *argv[]) {
     debugPrintf("[boot] reachable(rel): globalgamemanagers=%d metadata=%d unity_app_guid=%d\n",
                 reach_assets, reach_meta, reach_guid);
   }
+
+  /* save.txt -> SaveData*.runtime. Here, once the game folder is known and
+   * before the engine exists: the game reads its save during startup, so an
+   * edit made any later would be read too late or overwritten. */
+  lcgo_saveedit_run();
 
   /* Force libunity to RE-EXTRACT il2cpp resources every boot. Observed: when
    * extraction is skipped (il2cpp/unity.ver present), il2cpp mmaps the extracted

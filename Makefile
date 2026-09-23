@@ -18,7 +18,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 TARGET    := lcgo_nx
 APP_TITLE := Lara Croft GO
 APP_AUTHOR := ChanseyIsTheBest
-APP_VERSION := 1.0.0
+APP_VERSION := 1.0.2
 # Icon is optional: drop a 256x256 icon.jpg next to this Makefile and it gets
 # embedded; without one the build still succeeds and uses the libnx default.
 APP_ICON  := $(wildcard $(TOPDIR)/icon.jpg)

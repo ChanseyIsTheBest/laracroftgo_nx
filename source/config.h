@@ -124,6 +124,12 @@
  * the reflection path misbehaves. */
 #define LCGO_JNI_REFLECTION 1
 
+/* Save editor (lcgo_saveedit.c): save.txt next to the game edits the
+ * SaveData*.runtime files at boot, before the engine starts, and reports to
+ * save.log (which works with DEBUG_LOG off). 0 compiles it out: save.txt is
+ * then neither read nor created. */
+#define LCGO_SAVE_EDIT 1
+
 #define CONFIG_NAME "config.txt"
 #define LOG_NAME    game_path("debug.log")
 
